@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from importlib.metadata import version
 from pathlib import Path
 
 import numpy as np
@@ -42,7 +43,7 @@ def largest_slice(image: np.ndarray, mask: np.ndarray) -> np.ndarray:
 
 
 def to_tensor(crop: np.ndarray) -> torch.Tensor:
-    """Match the study preprocessing: 224-pixel crop, CLAHE, then 256/224 input."""
+    """Apply the fixed preprocessing used for ViT feature extraction."""
     if crop.size == 0 or not np.isfinite(crop).any():
         raise ValueError("Tumor crop is empty or contains no finite intensity values.")
     crop = crop - np.nanmin(crop)
@@ -50,20 +51,24 @@ def to_tensor(crop: np.ndarray) -> torch.Tensor:
     if not np.isfinite(denom) or denom <= 0:
         denom = 1.0
     crop = np.clip(crop / denom, 0, 1)
-    crop = (crop * 255).astype(np.uint8)
-    pil = Image.fromarray(crop).resize((224, 224), Image.Resampling.BILINEAR)
-    crop = equalize_adapthist(np.asarray(pil, dtype=np.float32) / 255.0)
-    pil = Image.fromarray((crop * 255).astype(np.uint8)).convert("RGB").resize((256, 256), Image.Resampling.BILINEAR)
+    crop = equalize_adapthist(crop.astype(np.float32))
+    pil = Image.fromarray((crop * 255).astype(np.uint8)).convert("RGB")
+    pil = pil.resize((256, 256), Image.Resampling.BILINEAR)
     left = (256 - 224) // 2
     pil = pil.crop((left, left, left + 224, left + 224))
     x = torch.from_numpy(np.asarray(pil)).permute(2, 0, 1).float() / 255.0
-    # The three duplicated channels were normalized with mean and SD of 0.5.
-    mean = torch.full((3, 1, 1), 0.5)
-    std = torch.full((3, 1, 1), 0.5)
+    mean = torch.tensor((0.485, 0.456, 0.406)).view(3, 1, 1)
+    std = torch.tensor((0.229, 0.224, 0.225)).view(3, 1, 1)
     return (x - mean) / std
 
 
 def main() -> None:
+    installed_version = version("timm")
+    if installed_version != "0.9.16":
+        raise RuntimeError(
+            "This analysis requires timm 0.9.16; "
+            f"found {installed_version}."
+        )
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True)
     parser.add_argument("--image-dir", required=True)
@@ -105,7 +110,7 @@ def main() -> None:
                 raise RuntimeError(
                     f"Expected 768 ViT features, got {features.size}"
                 )
-            # Preserve the feature naming convention used in Table S5.
+            # Preserve the feature naming convention used in the manuscript.
             rows.append(
                 {
                     "patient_id": patient_id,

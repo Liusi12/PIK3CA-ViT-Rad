@@ -3,14 +3,39 @@
 from __future__ import annotations
 
 import argparse
+from importlib.metadata import version
 from pathlib import Path
 
 import pandas as pd
+import SimpleITK as sitk
 import yaml
 from radiomics import featureextractor
 
 
+def largest_section_mask(mask: sitk.Image) -> sitk.Image:
+    """Retain only the axial section with the largest tumor area."""
+    array = sitk.GetArrayFromImage(mask)
+    if array.ndim != 3:
+        raise ValueError("Tumor mask must be three-dimensional.")
+    areas = (array > 0).reshape(array.shape[0], -1).sum(axis=1)
+    if areas.max() == 0:
+        raise ValueError("Tumor mask contains no foreground voxels.")
+    selected = array.copy()
+    selected[:] = 0
+    z = int(areas.argmax())
+    selected[z] = array[z] > 0
+    result = sitk.GetImageFromArray(selected.astype("uint8"))
+    result.CopyInformation(mask)
+    return result
+
+
 def main() -> None:
+    installed_version = version("pyradiomics")
+    if installed_version != "3.1.0":
+        raise RuntimeError(
+            "This analysis requires PyRadiomics 3.1.0; "
+            f"found {installed_version}."
+        )
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True)
     parser.add_argument("--image-dir", required=True)
@@ -35,6 +60,8 @@ def main() -> None:
         )
     else:
         extractor = featureextractor.RadiomicsFeatureExtractor()
+    extractor.settings["force2D"] = True
+    extractor.settings["force2Ddimension"] = 0
 
     image_dir = Path(args.image_dir)
     mask_dir = Path(args.mask_dir)
@@ -50,10 +77,18 @@ def main() -> None:
                 f"Missing mask for {patient_id}: {mask_path}"
             )
 
-        result = extractor.execute(
-            str(image_path),
-            str(mask_path),
-        )
+        image = sitk.ReadImage(str(image_path))
+        mask = sitk.ReadImage(str(mask_path))
+        if image.GetDimension() != 3 or mask.GetDimension() != 3:
+            raise ValueError(
+                f"Image and mask for {patient_id} must be three-dimensional."
+            )
+        if image.GetSize() != mask.GetSize():
+            raise ValueError(
+                f"Image and mask sizes differ for {patient_id}: "
+                f"{image.GetSize()} vs {mask.GetSize()}."
+            )
+        result = extractor.execute(image, largest_section_mask(mask))
         row = {"patient_id": patient_id}
         row.update(
             {
