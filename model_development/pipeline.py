@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Any
 import numpy as np
 import pandas as pd
-from scipy.stats import ttest_ind, mannwhitneyu
+from scipy.stats import shapiro, ttest_ind, mannwhitneyu
 from sklearn.impute import SimpleImputer
 from sklearn.linear_model import LogisticRegressionCV
 from sklearn.preprocessing import StandardScaler
@@ -64,12 +64,25 @@ def fit_selector(X: pd.DataFrame, y: pd.Series, p_threshold=.05, corr_cutoff=.75
     p = {}
     for col in Xs.columns:
         a, b = Xs.loc[y == 0, col], Xs.loc[y == 1, col]
-        p_t = ttest_ind(a, b, equal_var=False, nan_policy="omit").pvalue
-        p_w = mannwhitneyu(a, b, alternative="two-sided").pvalue if len(a) and len(b) else 1.0
-        p[col] = min(float(p_t), float(p_w))
+        if len(a) < 3 or len(b) < 3:
+            p[col] = 1.0
+            continue
+        normal = shapiro(a).pvalue >= .05 and shapiro(b).pvalue >= .05
+        if normal:
+            value = ttest_ind(
+                a, b, equal_var=True, nan_policy="omit"
+            ).pvalue
+        else:
+            value = mannwhitneyu(
+                a, b, alternative="two-sided"
+            ).pvalue
+        p[col] = float(value)
     screened = [c for c, value in p.items() if value < p_threshold]
     if not screened:
-        raise ValueError("No feature passed the t-test/Wilcoxon screening threshold in this fold.")
+        raise ValueError(
+            "No feature passed the distribution-appropriate univariable "
+            "screening threshold in this fold."
+        )
     keep = [c for c in screened if c not in find_correlated(Xs[screened], corr_cutoff)]
     if not keep:
         raise ValueError("Correlation filtering removed all screened features.")
@@ -89,6 +102,11 @@ def fit_selector(X: pd.DataFrame, y: pd.Series, p_threshold=.05, corr_cutoff=.75
 
 
 def make_model(name: str, params: dict, seed: int):
+    if "class_weight" in params:
+        raise ValueError(
+            "The final analysis used no class weighting; "
+            "remove the class_weight parameter."
+        )
     if name == "logistic_regression":
         return LogisticRegression(max_iter=10000, random_state=seed, **params)
     if name == "random_forest":

@@ -30,6 +30,10 @@ def youden_threshold(y, p):
 def main():
     ap = argparse.ArgumentParser(); ap.add_argument("--config", required=True); args = ap.parse_args()
     cfg = yaml.safe_load(Path(args.config).read_text())
+    if cfg.get("seed") != 123:
+        raise ValueError("The final analysis requires random seed 123.")
+    if cfg.get("split", {}).get("test_size") != 0.3:
+        raise ValueError("The final analysis requires a stratified 7:3 split.")
     out = Path(cfg["data"]["output_dir"]); out.mkdir(parents=True, exist_ok=True)
     c = cfg["columns"]; clinical = pd.read_csv(cfg["data"]["clinical_table"])
     rad = pd.read_csv(cfg["data"]["radiomics_table"]); vit = pd.read_csv(cfg["data"]["vit_table"])
@@ -45,12 +49,15 @@ def main():
     feature_sets = {"radiomics": rad_cols, "vit": vit_cols, "integrated": rad_cols + vit_cols}
     if not cfg["model"].get("xgb_candidates"):
         raise ValueError("config.yaml must contain the exact XGBoost settings used in the final analysis.")
-    radiomics_candidates = [("logistic_regression", {}), ("random_forest", {}), ("svm", {}), ("xgboost", cfg["model"]["xgb_candidates"][0])]
-    xgb_candidates = [("xgboost", x) for x in cfg["model"]["xgb_candidates"]]
+    model_candidates = [
+        ("logistic_regression", {}),
+        ("random_forest", {}),
+        ("svm", {}),
+        *(("xgboost", x) for x in cfg["model"]["xgb_candidates"]),
+    ]
     all_rows = []; selections = {}
     for set_name, cols in feature_sets.items():
-        candidates = radiomics_candidates if set_name == "radiomics" else xgb_candidates
-        best, cv = select_model(tr[cols], tr[target], candidates, cfg)
+        best, cv = select_model(tr[cols], tr[target], model_candidates, cfg)
         cv.to_csv(out / f"{set_name}_training_cv.csv", index=False)
         selector, model = fit_final(tr[cols], tr[target], best["model"], best["params"], cfg)
         expected_counts = cfg.get("expected_final_feature_counts", {})
